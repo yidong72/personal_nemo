@@ -35,7 +35,7 @@ def main(cfg) -> None:
     logging.info("\n\n************** Experiment configuration ***********")
     logging.info(f'\n{OmegaConf.to_yaml(cfg)}')
     if cfg.get('deepspeed', None) == 'yes':
-        plugins = [NLPDDPDeepSpeedPlugin(num_nodes=cfg.trainer.num_nodes, stage=3, offload_optimizer=True, offload_parameters=True, allgather_bucket_size=5e8, reduce_bucket_size=5e8)]
+        plugins = [NLPDDPDeepSpeedPlugin(num_nodes=cfg.trainer.num_nodes, stage=3, offload_optimizer=True, offload_parameters=True, allgather_bucket_size=5e8, reduce_bucket_size=5e8, allgather_partitions=True)]
     else:
         plugins = [NLPDDPPlugin(num_nodes=cfg.trainer.num_nodes)]
 
