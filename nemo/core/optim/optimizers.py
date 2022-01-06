@@ -43,9 +43,11 @@ AVAILABLE_OPTIMIZERS = {
 try:
     from apex.optimizers import FusedLAMB
     from apex.optimizers import FusedAdam
+    from deepspeed.ops.adam import FusedAdam, DeepSpeedCPUAdam
 
     AVAILABLE_OPTIMIZERS['lamb'] = FusedLAMB
     AVAILABLE_OPTIMIZERS['fused_adam'] = FusedAdam
+    AVAILABLE_OPTIMIZERS['cpu_adam'] = DeepSpeedCPUAdam
 except ModuleNotFoundError:
     logging.warning("Apex was not found. Using the lamb or fused_adam optimizer will error out.")
 

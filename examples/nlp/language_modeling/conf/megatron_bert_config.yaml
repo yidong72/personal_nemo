@@ -2,7 +2,7 @@ name: megatron_bert
 restore_from_path: null # used when starting from a .nemo file
 
 trainer:
-  gpus: 2
+  gpus: 4
   num_nodes: 1
   accelerator: ddp
   precision: 16
@@ -106,7 +106,7 @@ model:
     short_seq_prob: 0.1 # Probability of producing a short sequence.
   
   optim:
-    name: fused_adam
+    name: cpu_adam
     lr: 2e-4
     weight_decay: 0.01 
     betas: 

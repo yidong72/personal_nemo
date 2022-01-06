@@ -344,21 +344,21 @@ class MegatronBertModel(NLPModel):
         )
         return int(consumed_samples)
 
-    def configure_gradient_clipping(self, *args, **kwargs):
-        """PTL hook to configure gradients.
-           We use gradient clipping implementation from megatron-lm.
-        """
-        clip_val = self.trainer.gradient_clip_val
-        if clip_val is None:
-            return
-
-        clip_val = float(clip_val)
-        if clip_val <= 0:
-            return
-
-        parameters = self.model.parameters()
-        clip_grad_norm_fp32(parameters=parameters, max_norm=clip_val)
-
+#     def configure_gradient_clipping(self, *args, **kwargs):
+#         """PTL hook to configure gradients.
+#            We use gradient clipping implementation from megatron-lm.
+#         """
+#         clip_val = self.trainer.gradient_clip_val
+#         if clip_val is None:
+#             return
+# 
+#         clip_val = float(clip_val)
+#         if clip_val <= 0:
+#             return
+# 
+#         parameters = self.model.parameters()
+#         clip_grad_norm_fp32(parameters=parameters, max_norm=clip_val)
+# 
     def list_available_models(self):
         return None
 

@@ -28,6 +28,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
 from nemo.utils import AppState, logging
+from pytorch_lightning.plugins import DeepSpeedPlugin
 
 try:
     from apex.transformer import parallel_state
@@ -37,6 +38,126 @@ try:
 except (ImportError, ModuleNotFoundError):
 
     HAVE_APEX = False
+
+
+class NLPDDPDeepSpeedPlugin(DeepSpeedPlugin):
+
+#    accelerator = "ddp"
+
+    def __init__(
+        self,
+        **kwargs: Union[Any, Dict[str, Any]],
+    ) -> None:
+        super().__init__(**kwargs)
+        if not HAVE_APEX:
+            logging.warning("Apex was not found. Using model parallel or megatron models will error out.")
+
+    def setup_distributed(self, global_rank: int = None, world_size: int = None) -> None:
+        # call PTL init ddp
+        super().setup_distributed()
+
+        # init model parallel if needed
+        app_state = AppState()
+
+        if app_state.model_parallel_size is not None:
+            self.init_model_parallel(app_state.global_rank, app_state.world_size)
+
+    def configure_ddp(self):
+        """ Override LightningModule ddp if using model parallel.
+            Sets find_unused_parameters to False to use activation-checkpoint-recomputation.
+        """
+
+        app_state = AppState()
+
+        if app_state.model_parallel_size is not None:
+            logging.info(f"Configuring DDP for model parallelism.")
+
+            # With model parallelism, multiple GPUs form a large "logical GPU"
+            # this means that data parallel groups span multiple GPUs
+            # and are non-trivial
+            device_ids = self.determine_ddp_device_ids()
+            self._model = DistributedDataParallel(
+                LightningDistributedModule(self.model),
+                device_ids=device_ids,
+                output_device=device_ids[0],
+                process_group=app_state.data_parallel_group,
+                find_unused_parameters=False,
+                **self._ddp_kwargs,
+            )
+
+        else:
+            super().configure_ddp()
+
+    def init_model_parallel(self, global_rank: int, world_size: int) -> None:
+        """ Initializes Megatron-LM model parallel if using model parallelism.
+
+        Args:
+            global_rank (int): the global process index.
+            world_size (int): the total number of GPUs, num_nodes * num_gpus
+            is_slurm_managing_tasks (bool, optional): is the cluster managed by SLURM.
+        """
+        app_state = AppState()
+
+        # we initialize megatron-lm model parallel and data parallel groups
+        # after initializing DDP with PTL.
+        if app_state.model_parallel_size is not None:
+            if torch.distributed.is_initialized():
+                parallel_state.initialize_model_parallel(app_state.model_parallel_size)
+                app_state.model_parallel_group = parallel_state.get_tensor_model_parallel_group()
+                app_state.data_parallel_group = parallel_state.get_data_parallel_group()
+                app_state.model_parallel_rank = parallel_state.get_tensor_model_parallel_rank()
+                app_state.data_parallel_rank = parallel_state.get_data_parallel_rank()
+                app_state.data_parallel_size = parallel_state.get_data_parallel_world_size()
+                logging.info(f'mp_rank: {app_state.model_parallel_rank}')
+                logging.info(f'dp_rank: {app_state.data_parallel_rank}')
+
+    def save_checkpoint(self, checkpoint: Dict[str, Any], filepath: _PATH) -> None:
+        # PTL override to accomodate model parallel checkpoints
+        filepath = self._inject_model_parallel_rank(filepath)
+        return super().save_checkpoint(checkpoint, filepath)
+
+    def remove_checkpoint(self, filepath: _PATH) -> None:
+        # PTL override to accomodate model parallel checkpoints
+        filepath = self._inject_model_parallel_rank(filepath)
+        logging.info(f'Removing checkpoint: {filepath}')
+        return super().remove_checkpoint(filepath)
+
+    def _inject_model_parallel_rank(self, filepath):
+        app_state = AppState()
+        # inserts mp_rank_XX for model parallel checkpoints
+        if app_state.model_parallel_size is not None and app_state.model_parallel_size > 1:
+            # filepath needs to be updated to include mp_rank
+            dirname = os.path.dirname(filepath)
+            basename = os.path.basename(filepath)
+            filepath = f'{dirname}/mp_rank_{app_state.model_parallel_rank:02d}/{basename}'
+            return filepath
+        else:
+            return filepath
+
+    @property
+    def should_rank_save_checkpoint(self) -> bool:
+        # PTL override that determines if checkpoints should be saved based on rank
+        # for model parallel we need data_parallel_rank==0
+        app_state = AppState()
+        if app_state.model_parallel_size is not None and app_state.model_parallel_size > 1:
+            return app_state.data_parallel_rank == 0
+        else:
+            return super().should_rank_save_checkpoint
+
+    @property
+    def distributed_sampler_kwargs(self):
+        app_state = AppState()
+        if app_state.model_parallel_size is not None:
+            # When using model parallel, data parallel groups are non-trivial and they
+            # correspond to the logical GPUs. This means that the GPUs that form a
+            # single logical GPU all need to get the same batch of data.
+            distributed_sampler_kwargs = dict(
+                num_replicas=app_state.data_parallel_size, rank=app_state.data_parallel_rank
+            )
+            return distributed_sampler_kwargs
+
+        else:
+            return super(NLPDDPPlugin, self).distributed_sampler_kwargs
 
 
 class NLPDDPPlugin(DDPPlugin):

@@ -23,7 +23,8 @@ from pytorch_lightning.trainer.connectors.checkpoint_connector import Checkpoint
 
 from nemo.collections.nlp.models.language_modeling.megatron_bert_model import MegatronBertModel
 from nemo.collections.nlp.modules.common.megatron.megatron_utils import compute_model_parallel_rank
-from nemo.collections.nlp.parts.nlp_overrides import GradScaler, NLPDDPPlugin
+from nemo.collections.nlp.parts.nlp_overrides import GradScaler, NLPDDPPlugin, NLPDDPDeepSpeedPlugin
+
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import StatelessTimer, exp_manager
@@ -33,14 +34,17 @@ from nemo.utils.exp_manager import StatelessTimer, exp_manager
 def main(cfg) -> None:
     logging.info("\n\n************** Experiment configuration ***********")
     logging.info(f'\n{OmegaConf.to_yaml(cfg)}')
+    if cfg.get('deepspeed', None) == 'yes':
+        plugins = [NLPDDPDeepSpeedPlugin(num_nodes=cfg.trainer.num_nodes, stage=3, offload_optimizer=True, offload_parameters=True, allgather_bucket_size=5e8, reduce_bucket_size=5e8)]
+    else:
+        plugins = [NLPDDPPlugin(num_nodes=cfg.trainer.num_nodes)]
 
-    plugins = [NLPDDPPlugin(num_nodes=cfg.trainer.num_nodes)]
-    if cfg.trainer.precision == 16:
-        scaler = GradScaler(
-            init_scale=cfg.model.get('native_amp_init_scale', 2 ** 32),
-            growth_interval=cfg.model.get('native_amp_growth_interval', 1000),
-        )
-        plugins.append(NativeMixedPrecisionPlugin(precision=16, device='cuda', scaler=scaler))
+    # if cfg.trainer.precision == 16:
+    #     scaler = GradScaler(
+    #         init_scale=cfg.model.get('native_amp_init_scale', 2 ** 32),
+    #         growth_interval=cfg.model.get('native_amp_growth_interval', 1000),
+    #     )
+    #     plugins.append(NativeMixedPrecisionPlugin(precision=16, device='cuda', scaler=scaler))
 
     if cfg.get('cluster_type', None) == 'BCP':
         plugins.append(TorchElasticEnvironment())
