@@ -103,6 +103,8 @@ class GPTPromptLearningCOTDataset(Dataset):
             truncation_field = self.task_templates[taskname]['truncate_field']
             answer_only_loss = self.task_templates[taskname]["answer_only_loss"]
             answer_field = self.task_templates[taskname]["answer_field"]
+            cot_tokens = self.task_templates[taskname]["cot_tokens"]
+
 
             input_example = prompt_template
 
@@ -119,7 +121,7 @@ class GPTPromptLearningCOTDataset(Dataset):
 
             # Format the input example according to the template
             input_example = self._insert_text_in_template(input_example, prompt_template_fields, doc)
-            input_example = self._insert_virtual_token_placeholders(input_example, virtual_token_splits)
+            input_example = self._insert_virtual_token_placeholders(input_example, virtual_token_splits, cot_tokens)
             input_ids = self.tokenizer.text_to_ids(input_example)
 
             # Add BOS/EOS if desired, adds EOS by default
@@ -212,7 +214,7 @@ class GPTPromptLearningCOTDataset(Dataset):
 
         return input_example
 
-    def _insert_virtual_token_placeholders(self, input_example, virtual_token_splits):
+    def _insert_virtual_token_placeholders(self, input_example, virtual_token_splits, cot_token_num):
         """ Insert the correct number of pseudo tokens at the <|VIRTUAL_PROMPT_n|> markers """
         total_inserted_tokens = 0
 
@@ -222,7 +224,9 @@ class GPTPromptLearningCOTDataset(Dataset):
             pseudo_tokens_for_split = "".join(self.pseudo_tokens[split_start:split_end])
             input_example = input_example.replace(f'<|VIRTUAL_PROMPT_{idx}|>', pseudo_tokens_for_split)
             total_inserted_tokens = split_end
-
+        # the last virtual token is cot
+        cot_str = "".join([self.pseudo_tokens[-1]]*cot_token_num)
+        input_example = input_example.replace('<|COT|>', cot_str)
         return input_example
 
     def _truncate_input(self, truncation_field, input_ids, taskname, doc):

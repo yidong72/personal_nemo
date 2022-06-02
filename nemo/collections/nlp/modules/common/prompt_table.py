@@ -45,6 +45,7 @@ class VirtualPromptSource(enum.Enum):
 class VirtualPromptPlaceholderToken(enum.Enum):
     BASE = '<prompt_'
     END = '>'
+    COT = '<|cot|>'
 
 
 class PromptTable(NeuralModule, Exportable):
