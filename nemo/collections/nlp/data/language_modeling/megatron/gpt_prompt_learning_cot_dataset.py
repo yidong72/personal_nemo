@@ -19,6 +19,7 @@ from tqdm.auto import tqdm
 
 from nemo.collections.nlp.modules.common import VirtualPromptSource
 from nemo.collections.nlp.modules.common.megatron.utils import build_position_ids
+from nemo.collections.nlp.modules.common.prompt_table import VirtualPromptPlaceholderToken
 from nemo.core import Dataset
 from nemo.utils import logging
 
@@ -146,8 +147,10 @@ class GPTPromptLearningCOTDataset(Dataset):
                 answer_start_idx = None
                 if answer_only_loss and self.for_train:
                     answer_start_idx = self._find_answer_start(taskname, input_ids, answer_field, doc)
+                
+                cot_start, cot_end = self._find_cot_start_and_end(input_ids, cot_tokens)
 
-                self.examples.append((taskname_id, input_ids, answer_start_idx))
+                self.examples.append((taskname_id, input_ids, answer_start_idx, cot_start, cot_end))
             else:
                 skipped += 1
 
@@ -267,6 +270,12 @@ class GPTPromptLearningCOTDataset(Dataset):
 
         return answer_start_idx
 
+    def _find_cot_start_and_end(self, input_ids, cot_nums):
+        cot_id = self.tokenizer.token_to_id(VirtualPromptPlaceholderToken.COT.value)
+        cot_start = input_ids.index(cot_id)
+        cot_end = cot_start + cot_nums
+        return cot_start, cot_end
+
     def _add_leading_space(self, taskname, field_name, field_text):
         """ Add leading space to text if there is a space before it in the template """
         prompt_template = self.task_templates[taskname]["prompt_template"]
@@ -285,7 +294,7 @@ class GPTPromptLearningCOTDataset(Dataset):
     def collate_fn(self, batch):
         """ Prepares input_ids, labels, loss mask, attention_mask, and position ids for global batch """
         # Get max sequence length of batch
-        taskname_ids, input_ids, answer_starts = zip(*batch)
+        taskname_ids, input_ids, answer_starts, cot_start, cot_end = zip(*batch)
 
         # Pad taskname_ids to be the same length for the prompt encoder
         if self.virtual_prompt_source == VirtualPromptSource.PROMPT_ENCODER:
@@ -317,8 +326,10 @@ class GPTPromptLearningCOTDataset(Dataset):
         # Convert attention mask from float to bool
         attention_mask = attention_mask < 0.5
         position_ids = build_position_ids(input_ids)
+        cot_positions = torch.tensor([cot_start, cot_end])
+        answer_starts = torch.tensor(answer_starts)
 
-        return input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids
+        return input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts
 
     def pad_batch_and_build_loss_mask(self, input_ids, batch_max, answer_starts):
         """ Pad input_ids in batch to max batch length while building loss mask """
@@ -350,7 +361,7 @@ class GPTPromptLearningCOTDataset(Dataset):
         """
         Used for loading inference data. 
         """
-        task_id_nums, input_ids, answer_starts = zip(*self.examples)
+        task_id_nums, input_ids, answer_starts, cot_start, cot_end = zip(*self.examples)
         input_lengths = torch.cuda.LongTensor([len(inputs) for inputs in input_ids])
         task_id_nums = torch.cuda.LongTensor(task_id_nums)
         batch_max = input_lengths.max().item()

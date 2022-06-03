@@ -16,8 +16,11 @@ from omegaconf.dictconfig import DictConfig
 from pytorch_lightning.trainer.trainer import Trainer
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_prompt_learning_model import MegatronGPTPromptLearningModel
 from nemo.collections.nlp.data.language_modeling.megatron.gpt_prompt_learning_cot_dataset import GPTPromptLearningCOTDataset
-from nemo.collections.nlp.modules.common.prompt_table import VirtualPromptPlaceholderToken
+from nemo.collections.nlp.modules.common.megatron.utils import average_losses_across_data_parallel_group
+from nemo.collections.nlp.modules.common.prompt_table import VirtualPromptPlaceholderToken, VirtualPromptSource
 import re
+import torch
+from torch import Tensor
 
 try:
     from apex.transformer import parallel_state
@@ -35,6 +38,8 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
 
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         super().__init__(cfg, trainer)
+        self.cot_id = self.tokenizer.token_to_id(VirtualPromptPlaceholderToken.COT.value)
+
 
     def load_task_templates(self, task_templates):
         """
@@ -131,3 +136,138 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         )
 
         return dataset, dataloader
+
+    def validation_step(self, batch, batch_idx):
+        input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts = batch
+
+        with torch.no_grad():
+            output = self.forward(input_ids, position_ids, attention_mask, taskname_ids, labels, inference=False)
+            output_tensor, _ = output
+            loss = self.frozen_model.loss_func(loss_mask, output_tensor)
+            self.log('val_loss', loss)
+
+            return loss
+
+    def training_step(self, batch, batch_idx):
+        input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts = batch
+        output = self.forward(input_ids, position_ids, attention_mask, taskname_ids, labels, inference=False)
+        output_tensor, encoder_hidden_states = output
+        loss = self.frozen_model.loss_func(loss_mask, output_tensor)
+        self.log('train_loss', loss)
+
+        # Reduced loss for logging.
+        reduced_loss = average_losses_across_data_parallel_group([loss])
+
+        # Cache reduced loss while accumulating gradients
+        self._reduced_loss_buffer.append(reduced_loss[0])
+
+        if (batch_idx + 1) % self.trainer.accumulate_grad_batches == 0:
+            # Reduced loss for logging.
+            average_reduced_loss = sum(self._reduced_loss_buffer) / len(self._reduced_loss_buffer)
+            self.log('reduced_train_loss', average_reduced_loss, prog_bar=True)
+            lr = self._optimizer.param_groups[0]['lr']
+            self.log('lr', lr)
+            self.log('global_step', self.trainer.global_step, prog_bar=True)
+            self._reduced_loss_buffer = []
+
+        return loss
+
+    def forward(
+        self,
+        input_ids,
+        position_ids,
+        attention_mask,
+        taskname_ids,
+        labels=None,
+        inference=True,
+        set_inference_key_value_memory=False,
+        inference_max_sequence_len=None,
+    ):
+        """
+        Special forward method for p-tuning/prompt-tuning pretrained
+        GPT style models. Bypasses the vocab token preprocessing done
+        in the MegatronGPT class.
+        """
+        # Get embeddings for text tokens and insert virtual token embeddings
+        if inference:
+            input_embeds = self.embed_input_inference(input_ids, taskname_ids)
+        else:
+            input_embeds = self.embed_input_train(input_ids, taskname_ids)
+
+        position_embeddings = self.frozen_model.model.language_model.embedding.position_embeddings(position_ids)
+        encoder_input = input_embeds + position_embeddings
+
+        # Call forward on GPT model with preprocessed embeddings
+        if self.float_type == torch.float32:
+            output = self.frozen_model.model(
+                input_ids=None,
+                position_ids=None,
+                encoder_input=encoder_input,
+                attention_mask=attention_mask,
+                labels=labels,
+                set_inference_key_value_memory=set_inference_key_value_memory,
+                inference_max_sequence_len=inference_max_sequence_len,
+            )
+        else:
+            with torch.autocast(device_type="cuda", dtype=self.float_type):
+                output = self.frozen_model.model(
+                    input_ids=None,
+                    position_ids=None,
+                    encoder_input=encoder_input,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    set_inference_key_value_memory=set_inference_key_value_memory,
+                    inference_max_sequence_len=inference_max_sequence_len,
+                )
+
+        return output
+
+    def embed_input_train(self, input_ids: Tensor, taskname_ids: Tensor):
+        """
+        Replaces the virtual tokens in the input_ids with embeddings 
+        calculated from either the 'prompt_table' or 'prompt_encoder'. 
+        The virtual token placeholders have token_ids listed in
+        `self.pseudo_token_ids`.
+
+        params:
+            input_ids: the input token ids
+            taskname_ids: the NLP task tag token ids
+        returns:
+            the token embedding for the LM model.
+        """
+        # Replace virtual token ids with padding for forward pass through vocab embeddings
+        discrete_token_ids = input_ids.clone()
+        discrete_token_ids[(input_ids >= self.pseudo_token_ids_start)] = self.pad_token_id
+        discrete_token_embeds = self.word_embeddings(discrete_token_ids).clone()
+
+        # Find the indicies where virtual tokens should be inserted
+        virtual_token_locations = (input_ids >= self.pseudo_token_ids_start) & (input_ids < self.cot_id)
+
+        # If there are no virtual tokens, just return discrete token embeds
+        if not virtual_token_locations.any():
+            return discrete_token_embeds
+
+        # Get virtual token embeddings from the prompt table or prompt encoder
+        if self.virtual_prompt_source == VirtualPromptSource.PROMPT_TABLE:
+            virtual_token_embeds = [self.prompt_table(task_id_num) for task_id_num in taskname_ids]
+            virtual_token_embeds = torch.stack(virtual_token_embeds)
+
+        elif self.virtual_prompt_source == VirtualPromptSource.PROMPT_ENCODER:
+            taskname_embeddings = self.word_embeddings(taskname_ids)
+            virtual_token_embeds = self.prompt_encoder(taskname_embeddings=taskname_embeddings)
+
+        # Create index template specifying where virtual token embeddings should be placed
+        batch_size, _, embedding_size = discrete_token_embeds.shape
+        virtual_token_index = virtual_token_locations.nonzero().reshape((batch_size, -1, 2))[:, :, 1][:, :, None]
+        virtual_token_index = virtual_token_index.expand(
+            batch_size, self.total_new_task_virtual_tokens, embedding_size
+        )
+
+        # Make sure discrete_token_embeds and virtual_token_embeds share the same dtype
+        discrete_token_embeds = discrete_token_embeds.type(virtual_token_embeds.dtype)
+
+        # Insert virtual token embeddings where they belong amoung the discrete token embeddings
+        discrete_token_embeds.scatter_(1, virtual_token_index, virtual_token_embeds)
+        input_embeds = discrete_token_embeds
+
+        return input_embeds
