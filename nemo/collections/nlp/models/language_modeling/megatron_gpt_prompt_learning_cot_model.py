@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from unittest.util import _MAX_LENGTH
+from matplotlib.style import context
 from omegaconf.dictconfig import DictConfig
 from pytorch_lightning.trainer.trainer import Trainer
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_prompt_learning_model import MegatronGPTPromptLearningModel
@@ -23,6 +24,7 @@ import re
 import torch
 from torch import Tensor
 import torch.nn.functional as F
+from einops import repeat
 
 try:
     from apex.transformer import parallel_state
@@ -147,7 +149,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
 
     def validation_step(self, batch, batch_idx):
         input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts = batch
-
+        # return torch.tensor([0]).cuda()
         with torch.no_grad():
             output = self.forward(input_ids,
                                   position_ids,
@@ -156,7 +158,8 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                                   labels,
                                   inference=False,
                                   cot_positions=cot_positions,
-                                  answer_starts=answer_starts)
+                                  answer_starts=answer_starts,
+                                  loss_mask=loss_mask)
             output_tensor, _ = output
             loss = self.frozen_model.loss_func(loss_mask, output_tensor)
             self.log('val_loss', loss)
@@ -172,7 +175,8 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                               labels,
                               inference=False,
                               cot_positions=cot_positions,
-                              answer_starts=answer_starts)
+                              answer_starts=answer_starts,
+                              loss_mask=loss_mask)
         output_tensor, encoder_hidden_states = output
         loss = self.frozen_model.loss_func(loss_mask, output_tensor)
         self.log('train_loss', loss)
@@ -204,6 +208,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         inference=True,
         cot_positions=None,
         answer_starts=None,
+        loss_mask=None,
     ):
         """
         Special forward method for p-tuning/prompt-tuning pretrained
@@ -242,7 +247,9 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         #             inference_max_sequence_len=inference_max_sequence_len,
         #         )
         context_length = cot_positions.min().item()
-        context_lengths = cot_positions[0]
+        context_lengths = cot_positions[0].clone()
+        # stop index to copy over the embeddings after cot tokens
+        # cot_stop_index = cot_positions[1].clone()
 
         # added eos_id to support the function generate_samples_eval that passes
         # eos_id as an argument and needs termination when that id id found.
@@ -253,10 +260,11 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         is_done = torch.zeros([batch_size]).byte().cuda()
         embedding = encoder_input
         # Generate enough tokens for the longest sequence
-        maxlen = cot_positions.max().item() - context_length
+        maxlen = cot_positions.max().item()
         lengths = torch.ones([batch_size]).long().cuda() * maxlen
 
-        while context_length < maxlen:
+        # while loop exit when all the batch is done with sampling
+        while True:
             # types2use = None
             if counter == 0:
                 # Allocate memory for the entire context.
@@ -299,22 +307,56 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             # one_hot token
             one_hot_token = F.gumbel_softmax(logits, tau=1.0, hard=True)
             prev = torch.mm(one_hot_token, self.word_embeddings.weight)
+            # apply the positional embedding
+            prev += position_embeddings[:, context_length]
 
+            # the flag that it is going beyond the context
             started = context_lengths <= context_length
 
+            # index = repeat(cot_stop_index, 'k -> k 1 r', r=embedding.shape[-1])
+
+            # copied_embed = torch.gather(embedding, 1, index).squeeze(1)
+            
             new_emb = switch(embedding[:, context_length], prev, started)
 
             # Replace sampled tokens w/ done token if EOD has already been sampled
             # TODO, need to put the rest of the token_embeddings here
-            new_emb = switch(new_emb, self.eos_emb, is_done)
+#            new_emb = switch(new_emb, copied_embed, is_done)
+
+
 
             # Insert either new predicted or next prompt token
-            embedding[:, context_length] = new_emb
+            # only update the not done embedding
+            embedding[~is_done.bool(), context_length] = new_emb[~is_done.bool()]
 
             max_tokens = torch.argmax(one_hot_token,axis=-1)
 
-            done_token = (max_tokens == eod_id).byte() & started.byte()
+            # when sampling the eod token, and not started yet or reach the cot_end position
+            done_token = ((max_tokens == eod_id).byte() & started.byte()) | (context_length >= cot_positions[1]).byte()
+
+            if context_length == maxlen:
+                # all done
+                break
+
+            # first time finished?
             just_finished = (done_token & ~is_done).bool()
+
+            # if any batch just finished, copy over the things after cot 
+            if just_finished.any():
+                end = embedding.shape[1]
+                for i in range(batch_size):
+                    if just_finished[i]:
+                        start = cot_positions[1, i]
+                        embedding[i, context_length:end - start + context_length] = embedding[i, start:end]
+                        # add eos in the end
+                        embedding[i, end - start + context_length:] = self.eos_emb[None, :]
+                        # adjust labels
+
+                        # adjust loss _mask
+
+            # if it finishes early due ot eod_id sample, set the cot_stop early
+            # cot_stop_index[just_finished] = cot_positions[1][just_finished]
+            # set the context stopping position
             lengths[just_finished.view(-1)] = context_length
             is_done = is_done | done_token
 
