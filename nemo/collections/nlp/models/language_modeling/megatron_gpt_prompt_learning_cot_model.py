@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.util import _MAX_LENGTH
 from omegaconf.dictconfig import DictConfig
 from pytorch_lightning.trainer.trainer import Trainer
 from nemo.collections.nlp.models.language_modeling.megatron_gpt_prompt_learning_model import MegatronGPTPromptLearningModel
@@ -21,6 +22,7 @@ from nemo.collections.nlp.modules.common.prompt_table import VirtualPromptPlaceh
 import re
 import torch
 from torch import Tensor
+import torch.nn.functional as F
 
 try:
     from apex.transformer import parallel_state
@@ -34,11 +36,17 @@ except (ImportError, ModuleNotFoundError):
 __all__ = ['MegatronGPTPromptLearningCOTModel']
 
 
+def switch(val1, val2, boolean):
+    boolean = boolean.type_as(val1)[:, None]
+    return (1 - boolean) * val1 + boolean * val2
+
+
 class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
 
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         super().__init__(cfg, trainer)
         self.cot_id = self.tokenizer.token_to_id(VirtualPromptPlaceholderToken.COT.value)
+        self.eos_emb = self.word_embeddings(torch.tensor([self.tokenizer.eos_id]).cuda())[0]
 
 
     def load_task_templates(self, task_templates):
@@ -141,7 +149,14 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts = batch
 
         with torch.no_grad():
-            output = self.forward(input_ids, position_ids, attention_mask, taskname_ids, labels, inference=False)
+            output = self.forward(input_ids,
+                                  position_ids,
+                                  attention_mask,
+                                  taskname_ids,
+                                  labels,
+                                  inference=False,
+                                  cot_positions=cot_positions,
+                                  answer_starts=answer_starts)
             output_tensor, _ = output
             loss = self.frozen_model.loss_func(loss_mask, output_tensor)
             self.log('val_loss', loss)
@@ -150,7 +165,14 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
 
     def training_step(self, batch, batch_idx):
         input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts = batch
-        output = self.forward(input_ids, position_ids, attention_mask, taskname_ids, labels, inference=False)
+        output = self.forward(input_ids,
+                              position_ids,
+                              attention_mask,
+                              taskname_ids,
+                              labels,
+                              inference=False,
+                              cot_positions=cot_positions,
+                              answer_starts=answer_starts)
         output_tensor, encoder_hidden_states = output
         loss = self.frozen_model.loss_func(loss_mask, output_tensor)
         self.log('train_loss', loss)
@@ -180,8 +202,8 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         taskname_ids,
         labels=None,
         inference=True,
-        set_inference_key_value_memory=False,
-        inference_max_sequence_len=None,
+        cot_positions=None,
+        answer_starts=None,
     ):
         """
         Special forward method for p-tuning/prompt-tuning pretrained
@@ -198,27 +220,110 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         encoder_input = input_embeds + position_embeddings
 
         # Call forward on GPT model with preprocessed embeddings
-        if self.float_type == torch.float32:
-            output = self.frozen_model.model(
-                input_ids=None,
-                position_ids=None,
-                encoder_input=encoder_input,
-                attention_mask=attention_mask,
-                labels=labels,
-                set_inference_key_value_memory=set_inference_key_value_memory,
-                inference_max_sequence_len=inference_max_sequence_len,
-            )
-        else:
-            with torch.autocast(device_type="cuda", dtype=self.float_type):
+        # if self.float_type == torch.float32:
+        #     output = self.frozen_model.model(
+        #         input_ids=None,
+        #         position_ids=None,
+        #         encoder_input=encoder_input,
+        #         attention_mask=attention_mask,
+        #         labels=labels,
+        #         set_inference_key_value_memory=set_inference_key_value_memory,
+        #         inference_max_sequence_len=inference_max_sequence_len,
+        #     )
+        # else:
+        #     with torch.autocast(device_type="cuda", dtype=self.float_type):
+        #         output = self.frozen_model.model(
+        #             input_ids=None,
+        #             position_ids=None,
+        #             encoder_input=encoder_input,
+        #             attention_mask=attention_mask,
+        #             labels=labels,
+        #             set_inference_key_value_memory=set_inference_key_value_memory,
+        #             inference_max_sequence_len=inference_max_sequence_len,
+        #         )
+        context_length = cot_positions.min().item()
+        context_lengths = cot_positions[0]
+
+        # added eos_id to support the function generate_samples_eval that passes
+        # eos_id as an argument and needs termination when that id id found.
+        eod_id = self.tokenizer.eos_id
+        counter = 0
+
+        batch_size = input_ids.size(0)
+        is_done = torch.zeros([batch_size]).byte().cuda()
+        embedding = encoder_input
+        # Generate enough tokens for the longest sequence
+        maxlen = cot_positions.max().item() - context_length
+        lengths = torch.ones([batch_size]).long().cuda() * maxlen
+
+        while context_length < maxlen:
+            # types2use = None
+            if counter == 0:
+                # Allocate memory for the entire context.
+                set_inference_key_value_memory = True
+                embedding2use = embedding[:, :context_length]
+            else:
+                # Set this to false so the memory is not reallocated.
+                set_inference_key_value_memory = False
+                embedding2use = embedding[:, context_length - 1].view(batch_size, 1, -1)
+
+            # Call forward on GPT model with preprocessed embeddings
+            if self.float_type == torch.float32:
                 output = self.frozen_model.model(
                     input_ids=None,
                     position_ids=None,
-                    encoder_input=encoder_input,
+                    encoder_input=embedding2use,
                     attention_mask=attention_mask,
-                    labels=labels,
                     set_inference_key_value_memory=set_inference_key_value_memory,
-                    inference_max_sequence_len=inference_max_sequence_len,
+                    inference_max_sequence_len=maxlen,
                 )
+            else:
+                with torch.autocast(device_type="cuda", dtype=self.float_type):
+                    output = self.frozen_model.model(
+                        input_ids=None,
+                        position_ids=None,
+                        encoder_input=embedding2use,
+                        attention_mask=attention_mask,
+                        set_inference_key_value_memory=set_inference_key_value_memory,
+                        inference_max_sequence_len=maxlen,
+                    )
+
+            output = output.float()
+            # 
+            assert output is not None
+            logits = output[:, -1].view(batch_size, -1).contiguous()
+
+            # make sure it won't sample outside the vocab_size range
+            logits[:, self.pseudo_token_ids_start:] = -float('Inf')
+
+            # one_hot token
+            one_hot_token = F.gumbel_softmax(logits, tau=1.0, hard=True)
+            prev = torch.mm(one_hot_token, self.word_embeddings.weight)
+
+            started = context_lengths <= context_length
+
+            new_emb = switch(embedding[:, context_length], prev, started)
+
+            # Replace sampled tokens w/ done token if EOD has already been sampled
+            # TODO, need to put the rest of the token_embeddings here
+            new_emb = switch(new_emb, self.eos_emb, is_done)
+
+            # Insert either new predicted or next prompt token
+            embedding[:, context_length] = new_emb
+
+            max_tokens = torch.argmax(one_hot_token,axis=-1)
+
+            done_token = (max_tokens == eod_id).byte() & started.byte()
+            just_finished = (done_token & ~is_done).bool()
+            lengths[just_finished.view(-1)] = context_length
+            is_done = is_done | done_token
+
+            done = torch.all(is_done)
+            context_length += 1
+
+            counter += 1
+            if done:
+                break
 
         return output
 
