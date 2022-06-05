@@ -176,9 +176,11 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             self.log('val_loss', loss)
 
             return loss
-    
+
     def _schedule_tau(self):
-        return self.min_tau + (self.max_tau - self.min_tau) * (1.0 - self.trainer.current_epoch/self.trainer.max_epochs)
+        return self.min_tau + (self.max_tau - self.min_tau) * (
+            1.0 - self.trainer.current_epoch / self.trainer.max_epochs
+        )
 
     def training_step(self, batch, batch_idx):
         input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts = batch

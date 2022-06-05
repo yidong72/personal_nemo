@@ -14,15 +14,15 @@
 
 import json
 
+import numpy as np
 import torch
 from tqdm.auto import tqdm
 
 from nemo.collections.nlp.modules.common import VirtualPromptSource
+from nemo.collections.nlp.modules.common.megatron.utils import ApexGuardDefaults, build_attention_mask_3d
 from nemo.collections.nlp.modules.common.prompt_table import VirtualPromptPlaceholderToken
 from nemo.core import Dataset
 from nemo.utils import logging
-import numpy as np
-from nemo.collections.nlp.modules.common.megatron.utils import ApexGuardDefaults, build_attention_mask_3d
 
 try:
     from apex.transformer.enums import AttnMaskType
@@ -44,7 +44,7 @@ def build_position_ids(token_ids, pad_infront):
     position_ids = position_ids.unsqueeze(0).expand_as(token_ids).clone()
     for i in range(len(token_ids)):
         rolled = torch.roll(position_ids[i], pad_infront[i])
-        rolled[0:pad_infront[i]] = 0
+        rolled[0 : pad_infront[i]] = 0
         position_ids[i] = rolled
     return position_ids
 
