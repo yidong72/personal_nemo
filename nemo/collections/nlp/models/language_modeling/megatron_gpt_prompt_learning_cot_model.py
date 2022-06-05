@@ -47,6 +47,11 @@ def switch(val1, val2, boolean):
     return (1 - boolean) * val1 + boolean * val2
 
 
+def switch_token(val1, val2, boolean):
+    boolean = boolean.type_as(val1)
+    return (1 - boolean) * val1 + boolean * val2
+
+
 class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         super().__init__(cfg, trainer)
@@ -160,7 +165,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts = batch
         # return torch.tensor([0]).cuda()
         with torch.no_grad():
-            output = self.forward(
+            output, output_ids = self.forward(
                 input_ids,
                 position_ids,
                 attention_mask,
@@ -170,7 +175,12 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                 cot_positions=cot_positions,
                 answer_starts=answer_starts,
                 loss_mask=loss_mask,
+                get_tokens=True,
             )
+            if batch_idx < 4:
+                print(f'batch id: {batch_idx}')
+                for i in range(len(output_ids)):
+                    print(self.tokenizer.ids_to_text(output_ids[i]))
             output_tensor, _ = output
             loss = self.frozen_model.loss_func(loss_mask, output_tensor)
             self.log('val_loss', loss)
@@ -184,7 +194,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
 
     def training_step(self, batch, batch_idx):
         input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts = batch
-        output = self.forward(
+        output, output_ids = self.forward(
             input_ids,
             position_ids,
             attention_mask,
@@ -194,6 +204,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             cot_positions=cot_positions,
             answer_starts=answer_starts,
             loss_mask=loss_mask,
+            get_tokens=False,
         )
         output_tensor, encoder_hidden_states = output
         loss = self.frozen_model.loss_func(loss_mask, output_tensor)
@@ -229,6 +240,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         cot_positions=None,
         answer_starts=None,
         loss_mask=None,
+        get_tokens=False,
     ):
         """
         Special forward method for p-tuning/prompt-tuning pretrained
@@ -261,6 +273,11 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         # Generate enough tokens for the longest sequence
         maxlen = cot_positions.max().item()
         lengths = torch.ones([batch_size]).long().cuda() * maxlen
+
+        if get_tokens:
+            output_tokens = input_ids.clone()
+        else:
+            output_tokens = None
 
         # while loop exit when all the batch is done with sampling
         while True:
@@ -327,14 +344,17 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             embedding[~is_done.bool(), context_length] = new_emb[~is_done.bool()]
 
             max_tokens = torch.argmax(one_hot_token, axis=-1)
+            max_tokens = switch_token(input_ids[:, context_length], max_tokens, started)
 
-            # when sampling the eod token, and not started yet or reach the cot_end position
+            if get_tokens:
+                output_tokens[~is_done.bool(), context_length] = max_tokens[~is_done.bool()]
+
+            # when sampling the eod token and started and not done yet,  or reach the cot_end position
             done_token = ((max_tokens == eod_id).byte() & started.byte()) | (context_length >= cot_positions[1]).byte()
-
-            if context_length == maxlen:
-                # all done
-                break
-
+            #             if context_length == maxlen:
+            #                 # all done
+            #                 break
+            #
             # first time finished?
             just_finished = (done_token & ~is_done).bool()
 
@@ -352,6 +372,12 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                         # adjust loss _mask
                         loss_mask[i, context_length : end - start + context_length] = loss_mask[i, start:end].clone()
                         loss_mask[i, end - start + context_length :] = 0
+                        # adjust output tokens
+                        if get_tokens:
+                            output_tokens[i, context_length : end - start + context_length] = input_ids[
+                                i, start:end
+                            ].clone()
+                            output_tokens[i, end - start + context_length :] = self.eos_token_id
 
             # if it finishes early due ot eod_id sample, set the cot_stop early
             # cot_stop_index[just_finished] = cot_positions[1][just_finished]
@@ -389,7 +415,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                     inference_max_sequence_len=None,
                 )
 
-        return output
+        return output, output_tokens
 
     def embed_input_train(self, input_ids: Tensor, taskname_ids: Tensor):
         """
