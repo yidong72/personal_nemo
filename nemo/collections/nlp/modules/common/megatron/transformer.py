@@ -591,8 +591,8 @@ class ParallelAttention(MegatronModule):
             end = self.inference_current_sequence_len
             # Copy key and values.
             if self.inference_key_memory is None:
-                self.inference_key_memory = key_layer.clone()
-                self.inference_value_memory = value_layer.clone()
+                self.inference_key_memory = key_layer
+                self.inference_value_memory = value_layer
             else:
                 self.inference_value_memory = torch.cat([self.inference_value_memory, value_layer], 0)
                 self.inference_key_memory = torch.cat([self.inference_key_memory, key_layer], 0)
