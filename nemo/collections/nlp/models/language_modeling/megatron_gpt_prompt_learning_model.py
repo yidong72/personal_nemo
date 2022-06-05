@@ -490,6 +490,8 @@ class MegatronGPTPromptLearningModel(MegatronBaseModel, TextGeneration):
             return loss
 
     def validation_epoch_end(self, outputs):
+        if len(outputs) == 0:
+            return
         averaged_loss = average_losses_across_data_parallel_group(outputs)
 
         # we can only log on one rank if it is rank zero so we broadcast from last rank
@@ -731,7 +733,6 @@ class MegatronGPTPromptLearningModel(MegatronBaseModel, TextGeneration):
     @classmethod
     def list_available_models(cls):
         pass
-
 
     def get_pseudo_tokens(self, num_virtual_tokens):
         """

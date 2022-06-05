@@ -106,7 +106,6 @@ class GPTPromptLearningCOTDataset(Dataset):
             answer_field = self.task_templates[taskname]["answer_field"]
             cot_tokens = self.task_templates[taskname]["cot_tokens"]
 
-
             input_example = prompt_template
 
             self._input_sanity_checks(
@@ -147,7 +146,7 @@ class GPTPromptLearningCOTDataset(Dataset):
                 answer_start_idx = None
                 if answer_only_loss and self.for_train:
                     answer_start_idx = self._find_answer_start(taskname, input_ids, answer_field, doc)
-                
+
                 cot_start, cot_end = self._find_cot_start_and_end(input_ids, cot_tokens)
 
                 self.examples.append((taskname_id, input_ids, answer_start_idx, cot_start, cot_end))
@@ -228,7 +227,7 @@ class GPTPromptLearningCOTDataset(Dataset):
             input_example = input_example.replace(f'<|VIRTUAL_PROMPT_{idx}|>', pseudo_tokens_for_split)
             total_inserted_tokens = split_end
         # the last virtual token is cot
-        cot_str = "".join([self.pseudo_tokens[-1]]*cot_token_num)
+        cot_str = "".join([self.pseudo_tokens[-1]] * cot_token_num)
         input_example = input_example.replace('<|COT|>', cot_str)
         return input_example
 
