@@ -17,8 +17,6 @@ from unittest.util import _MAX_LENGTH
 
 import torch
 import torch.nn.functional as F
-from einops import repeat
-from matplotlib.style import context
 from omegaconf.dictconfig import DictConfig
 from pytorch_lightning.trainer.trainer import Trainer
 from torch import Tensor
@@ -57,6 +55,8 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         self.eos_emb = self.word_embeddings(torch.tensor([self.tokenizer.eos_id]).cuda())[0]
         self.pad_token_id = self.pad_id
         self.eos_token_id = self.tokenizer.eos_id if self.tokenizer.eos_id is not None else self.tokenizer.unk_id
+        self.min_tau = cfg.get('min_tau', 0.1)
+        self.max_tau = cfg.get('max_tau', 1.0)
 
     def load_task_templates(self, task_templates):
         """
@@ -176,6 +176,9 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             self.log('val_loss', loss)
 
             return loss
+    
+    def _schedule_tau(self):
+        return self.min_tau + (self.max_tau - self.min_tau) * (1.0 - self.trainer.current_epoch/self.trainer.max_epochs)
 
     def training_step(self, batch, batch_idx):
         input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts = batch
@@ -192,6 +195,8 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         )
         output_tensor, encoder_hidden_states = output
         loss = self.frozen_model.loss_func(loss_mask, output_tensor)
+        tau_value = self._schedule_tau()
+        self.log('tau', tau_value)
         self.log('train_loss', loss)
 
         # Reduced loss for logging.
@@ -228,6 +233,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         GPT style models. Bypasses the vocab token preprocessing done
         in the MegatronGPT class.
         """
+        tau_value = self._schedule_tau()
         # Get embeddings for text tokens and insert virtual token embeddings
         if inference:
             input_embeds = self.embed_input_inference(input_ids, taskname_ids)
@@ -237,28 +243,6 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         position_embeddings = self.frozen_model.model.language_model.embedding.position_embeddings(position_ids)
         encoder_input = input_embeds + position_embeddings
 
-        # Call forward on GPT model with preprocessed embeddings
-        # if self.float_type == torch.float32:
-        #     output = self.frozen_model.model(
-        #         input_ids=None,
-        #         position_ids=None,
-        #         encoder_input=encoder_input,
-        #         attention_mask=attention_mask,
-        #         labels=labels,
-        #         set_inference_key_value_memory=set_inference_key_value_memory,
-        #         inference_max_sequence_len=inference_max_sequence_len,
-        #     )
-        # else:
-        #     with torch.autocast(device_type="cuda", dtype=self.float_type):
-        #         output = self.frozen_model.model(
-        #             input_ids=None,
-        #             position_ids=None,
-        #             encoder_input=encoder_input,
-        #             attention_mask=attention_mask,
-        #             labels=labels,
-        #             set_inference_key_value_memory=set_inference_key_value_memory,
-        #             inference_max_sequence_len=inference_max_sequence_len,
-        #         )
         context_length = cot_positions.min().item()
         context_lengths = cot_positions[0].clone()
         # stop index to copy over the embeddings after cot tokens
@@ -318,7 +302,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             logits[:, self.pseudo_token_ids_start :] = -float('Inf')
 
             # one_hot token
-            one_hot_token = F.gumbel_softmax(logits, tau=1.0, hard=True)
+            one_hot_token = F.gumbel_softmax(logits, tau=tau_value, hard=True)
             prev = torch.mm(one_hot_token, self.word_embeddings.weight)
             # apply the positional embedding
             prev += position_embeddings[:, context_length]
