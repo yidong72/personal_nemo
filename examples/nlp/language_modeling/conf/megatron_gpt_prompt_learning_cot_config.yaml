@@ -44,7 +44,7 @@ model:
   encoder_seq_length: 1024 
   tensor_model_parallel_size: 1 # intra-layer model parallelism
   pipeline_model_parallel_size: 1 # inter-layer model parallelism
-  batch_size: 8
+  batch_size: 4
 
   restore_path: null # Path to an existing p-tuned/prompt tuned .nemo model you wish to add new tasks to or run inference with
   language_model_path: models/megatron_125M_gpt.nemo # Path to the GPT language model .nemo file, not needed if restore path is set  
@@ -59,7 +59,7 @@ model:
     prompt_template: '<|VIRTUAL_PROMPT_0|> {question} <|VIRTUAL_PROMPT_1|> A: <|VIRTUAL_PROMPT_2|> let us think step by step <|COT|> therefore the answer is:{answer}' # Prompt template for task, specify virtual prompt positions with <|VIRTUAL_PROMPT_#|>
     total_virtual_tokens: 9 # Sum of tokens in virtual_token_splits must add to this number. Can differ between new and existing tasks, but must match across all new tasks being tuned at the same time.
     virtual_token_splits: [3, 3, 3] # number of virtual tokens to be inserted at each VIRTUAL PROMPT location, must add to total_virtual_tokens
-    cot_tokens: 30 # chain of thought number of tokens
+    cot_tokens: 90 # chain of thought number of tokens
     truncate_field: 'question' # The {field} in the prompt template whose text will be truncated if the input is too long, if null, inputs that are too long will just be skipped.
     answer_only_loss: True 
     answer_field: 'answer'
