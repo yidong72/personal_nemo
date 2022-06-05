@@ -18,12 +18,35 @@ import torch
 from tqdm.auto import tqdm
 
 from nemo.collections.nlp.modules.common import VirtualPromptSource
-from nemo.collections.nlp.modules.common.megatron.utils import build_position_ids
 from nemo.collections.nlp.modules.common.prompt_table import VirtualPromptPlaceholderToken
 from nemo.core import Dataset
 from nemo.utils import logging
+import numpy as np
+from nemo.collections.nlp.modules.common.megatron.utils import ApexGuardDefaults, build_attention_mask_3d
+
+try:
+    from apex.transformer.enums import AttnMaskType
+
+    HAVE_APEX = True
+except (ImportError, ModuleNotFoundError):
+    # fake missing classes with None attributes
+    AttnMaskType = ApexGuardDefaults()
+    ModelType = ApexGuardDefaults()
+    HAVE_APEX = False
 
 __all__ = ['GPTPromptLearningCOTDataset']
+
+
+def build_position_ids(token_ids, pad_infront):
+    # Create position ids
+    seq_length = token_ids.size(1)
+    position_ids = torch.arange(seq_length, dtype=torch.long, device=token_ids.device)
+    position_ids = position_ids.unsqueeze(0).expand_as(token_ids).clone()
+    for i in range(len(token_ids)):
+        rolled = torch.roll(position_ids[i], pad_infront[i])
+        rolled[0:pad_infront[i]] = 0
+        position_ids[i] = rolled
+    return position_ids
 
 
 class GPTPromptLearningCOTDataset(Dataset):
@@ -38,7 +61,8 @@ class GPTPromptLearningCOTDataset(Dataset):
         virtual_prompt_source: VirtualPromptSource,
         task_templates: dict,
         pseudo_tokens,
-        pad_token_id: str,
+        eos_token_id: int,
+        pad_token_id: int,
         max_seq_length: int,
         min_seq_length: int = 1,
         add_bos: bool = False,
@@ -51,6 +75,7 @@ class GPTPromptLearningCOTDataset(Dataset):
         self.pseudo_tokens = pseudo_tokens
         self.pseudo_token_ids = set(self.tokenizer.tokens_to_ids(self.pseudo_tokens))
         self.pad_token_id = pad_token_id
+        self.eos_token_id = eos_token_id
         self.max_seq_length = max_seq_length
         self.min_seq_length = min_seq_length
         self.add_bos = add_bos
@@ -227,7 +252,7 @@ class GPTPromptLearningCOTDataset(Dataset):
             input_example = input_example.replace(f'<|VIRTUAL_PROMPT_{idx}|>', pseudo_tokens_for_split)
             total_inserted_tokens = split_end
         # the last virtual token is cot
-        cot_str = "".join([self.pseudo_tokens[-1]] * cot_token_num)
+        cot_str = "".join([VirtualPromptPlaceholderToken.COT.value] * cot_token_num)
         input_example = input_example.replace('<|COT|>', cot_str)
         return input_example
 
@@ -298,7 +323,7 @@ class GPTPromptLearningCOTDataset(Dataset):
         # Pad taskname_ids to be the same length for the prompt encoder
         if self.virtual_prompt_source == VirtualPromptSource.PROMPT_ENCODER:
             max_taskname_length = max(len(ids) for ids in taskname_ids)
-            taskname_ids = [ids + [self.pad_token_id] * (max_taskname_length - len(ids)) for ids in taskname_ids]
+            taskname_ids = [ids + [self.eos_token_id] * (max_taskname_length - len(ids)) for ids in taskname_ids]
             taskname_ids = torch.tensor(taskname_ids)
 
         # Task ids are just used for a look up embeddings for prompt-table
@@ -306,7 +331,9 @@ class GPTPromptLearningCOTDataset(Dataset):
             taskname_ids = torch.tensor(taskname_ids)
 
         batch_max = max(len(ids) for ids in input_ids)
-        input_ids, loss_mask = self.pad_batch_and_build_loss_mask(input_ids, batch_max, answer_starts)
+        pad_infront = np.array(cot_start).max() - np.array(cot_start)
+
+        input_ids, loss_mask, batch_max = self.pad_batch_and_build_loss_mask(input_ids, answer_starts, pad_infront)
 
         # Should be a label for every token in batch, label is the next token
         labels = input_ids[:, 1:].contiguous()
@@ -316,24 +343,25 @@ class GPTPromptLearningCOTDataset(Dataset):
         # Loss mask should align with labels
         loss_mask = loss_mask[:, 1:].contiguous()
 
-        # Using causal attention mask for whole input
-        batch_size = len(input_ids)
-        attention_mask = torch.tril(torch.ones((batch_size, batch_max, batch_max))).view(
-            batch_size, 1, batch_max, batch_max
+        dec_attn_mask = input_ids != self.pad_token_id
+        dec_attn_mask_3d = build_attention_mask_3d(
+            source_mask=dec_attn_mask, target_mask=dec_attn_mask, attn_mask_type=AttnMaskType.causal,
         )
+        dec_attn_mask_3d = dec_attn_mask_3d[:, None, :, :]
 
-        # Convert attention mask from float to bool
-        attention_mask = attention_mask < 0.5
-        position_ids = build_position_ids(input_ids)
+        position_ids = build_position_ids(input_ids, pad_infront)
+        cot_start = np.array(cot_start) + pad_infront
+        cot_end = np.array(cot_end) + pad_infront
         cot_positions = torch.tensor([cot_start, cot_end])
         answer_starts = torch.tensor(answer_starts)
 
-        return input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids, cot_positions, answer_starts
+        return input_ids, labels, loss_mask, position_ids, dec_attn_mask_3d, taskname_ids, cot_positions, answer_starts
 
-    def pad_batch_and_build_loss_mask(self, input_ids, batch_max, answer_starts):
+    def pad_batch_and_build_loss_mask(self, input_ids, answer_starts, pad_infront):
         """ Pad input_ids in batch to max batch length while building loss mask """
         batch_loss_masks = []
-        for ids, answer_start_idx in zip(input_ids, answer_starts):
+        all_ids = []
+        for ids, answer_start_idx, pad_before in zip(input_ids, answer_starts, pad_infront):
             if answer_start_idx is not None:
                 # Loss mask where answer tokens are 1.0 and all other tokens are 0.0
                 loss_mask = [float(idx >= answer_start_idx) for idx in range(len(ids))]
@@ -343,18 +371,29 @@ class GPTPromptLearningCOTDataset(Dataset):
 
             # Pad to max length
             input_length = len(ids)
-            padding_length = batch_max - input_length
-            ids.extend([self.pad_token_id] * padding_length)
 
+            single_ids = [self.pad_token_id] * pad_before + ids
+            single_mask = [0.0] * pad_before + loss_mask
+            all_ids.append(single_ids)
             # Account for padding in loss mask
-            loss_mask.extend([0.0] * padding_length)
-            batch_loss_masks.append(torch.tensor(loss_mask, dtype=torch.float))
+            # loss_mask.extend([0.0] * padding_length)
+            batch_loss_masks.append(single_mask)
+
+        batch_max = max(len(ids) for ids in all_ids)
+
+        for ids, loss_masks in zip(all_ids, batch_loss_masks):
+            # Pad to max length
+            input_length = len(ids)
+            padding_length = batch_max - input_length
+
+            ids.extend([self.eos_token_id] * padding_length)
+            loss_masks.extend([0.0] * padding_length)
 
         # Make into torch tensors
-        input_ids = torch.tensor(input_ids, dtype=torch.long)
-        batch_loss_masks = torch.stack(batch_loss_masks)
+        input_ids = torch.tensor(all_ids, dtype=torch.long)
+        batch_loss_masks = torch.tensor(batch_loss_masks)
 
-        return input_ids, batch_loss_masks
+        return input_ids, batch_loss_masks, batch_max
 
     def get_all_examples(self, tokens_to_generate):
         """

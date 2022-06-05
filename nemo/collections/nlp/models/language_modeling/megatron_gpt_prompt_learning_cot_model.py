@@ -53,7 +53,10 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
     def __init__(self, cfg: DictConfig, trainer: Trainer):
         super().__init__(cfg, trainer)
         self.cot_id = self.tokenizer.token_to_id(VirtualPromptPlaceholderToken.COT.value)
+        self.pad_id = self.tokenizer.token_to_id(VirtualPromptPlaceholderToken.PAD.value)
         self.eos_emb = self.word_embeddings(torch.tensor([self.tokenizer.eos_id]).cuda())[0]
+        self.pad_token_id = self.pad_id
+        self.eos_token_id = self.tokenizer.eos_id if self.tokenizer.eos_id is not None else self.tokenizer.unk_id
 
     def load_task_templates(self, task_templates):
         """
@@ -114,6 +117,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             for i in range(num_virtual_tokens)
         ]
         pseudo_tokens.append(VirtualPromptPlaceholderToken.COT.value)
+        pseudo_tokens.append(VirtualPromptPlaceholderToken.PAD.value)
         return pseudo_tokens
 
     def build_virtual_prompt_dataset(
@@ -125,6 +129,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             virtual_prompt_source=self.virtual_prompt_source,
             task_templates=self.task_templates,
             pseudo_tokens=self.pseudo_tokens,
+            eos_token_id=self.eos_token_id,
             pad_token_id=self.pad_token_id,
             max_seq_length=self.cfg.data.get('max_seq_length', self.frozen_model.cfg.max_position_embeddings),
             min_seq_length=self.cfg.data.get('min_seq_length', 1),
