@@ -347,13 +347,13 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                 for i in range(batch_size):
                     if just_finished[i]:
                         start = cot_positions[1, i]
-                        embedding[i, context_length:end - start + context_length] = embedding[i, start:end]
+                        embedding[i, context_length:end - start + context_length] = embedding[i, start:end].clone()
                         # add eos in the end
                         embedding[i, end - start + context_length:] = self.eos_emb[None, :]
                         # adjust labels
-                        labels[i, context_length:end - start + context_length] = labels[i, start:end]
+                        labels[i, context_length:end - start + context_length] = labels[i, start:end].clone()
                         # adjust loss _mask
-                        loss_mask[i, context_length:end - start + context_length] = loss_mask[i, start:end]
+                        loss_mask[i, context_length:end - start + context_length] = loss_mask[i, start:end].clone()
                         loss_mask[i, end - start + context_length:] = 0
 
             # if it finishes early due ot eod_id sample, set the cot_stop early

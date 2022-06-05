@@ -517,17 +517,17 @@ class ParallelAttention(MegatronModule):
         # =================================================
         if set_inference_key_value_memory:
             assert inference_max_sequence_len and inference_max_sequence_len > 0
-            self.inference_key_memory = self._allocate_memory(
-                inference_max_sequence_len, hidden_states.size(1), hidden_states.dtype
-            )
-            self.inference_value_memory = self._allocate_memory(
-                inference_max_sequence_len, hidden_states.size(1), hidden_states.dtype
-            )
+            # self.inference_key_memory = self._allocate_memory(
+            #     inference_max_sequence_len, hidden_states.size(1), hidden_states.dtype
+            # )
+            # self.inference_value_memory = self._allocate_memory(
+            #     inference_max_sequence_len, hidden_states.size(1), hidden_states.dtype
+            # )
             self.inference_current_sequence_len = 0
         # Some consistency check.
-        if inference_max_sequence_len:
-            assert self.inference_current_sequence_len < self.inference_key_memory.size(0)
-            assert inference_max_sequence_len == self.inference_key_memory.size(0)
+        # if inference_max_sequence_len:
+        #     assert self.inference_current_sequence_len < self.inference_key_memory.size(0)
+        #     assert inference_max_sequence_len == self.inference_key_memory.size(0)
         # This is added for safety. In case inference_max_sequence_len
         # is not provided, make sure there is no potential memory left
         # from previous inference.
@@ -590,10 +590,18 @@ class ParallelAttention(MegatronModule):
             self.inference_current_sequence_len += key_layer.size(0)
             end = self.inference_current_sequence_len
             # Copy key and values.
-            self.inference_key_memory[start:end, ...] = key_layer
-            self.inference_value_memory[start:end, ...] = value_layer
-            key_layer = self.inference_key_memory[:end, ...]
-            value_layer = self.inference_value_memory[:end, ...]
+            if self.inference_key_memory is None:
+                self.inference_key_memory = key_layer.clone()
+                self.inference_value_memory = value_layer.clone()
+            else:
+                self.inference_value_memory = torch.cat([self.inference_value_memory, value_layer], 0)
+                self.inference_key_memory = torch.cat([self.inference_key_memory, key_layer], 0)
+            # inference_key_memory = self.inference_key_memory[:end, ...].clone()
+            # inference_value_memory = self.inference_value_memory[:end, ...].clone()
+            # inference_key_memory[start:end, ...] = key_layer.clone()
+            # inference_value_memory[start:end, ...] = value_layer.clone()
+            key_layer = self.inference_key_memory
+            value_layer = self.inference_value_memory
             # Adjust attention mask
             attention_mask = attention_mask[..., start:end, :end]
             # adjust the key rotary positional embedding
