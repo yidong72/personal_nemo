@@ -351,8 +351,10 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                         # add eos in the end
                         embedding[i, end - start + context_length:] = self.eos_emb[None, :]
                         # adjust labels
-
+                        labels[i, context_length:end - start + context_length] = labels[i, start:end]
                         # adjust loss _mask
+                        loss_mask[i, context_length:end - start + context_length] = loss_mask[i, start:end]
+                        loss_mask[i, end - start + context_length:] = 0
 
             # if it finishes early due ot eod_id sample, set the cot_stop early
             # cot_stop_index[just_finished] = cot_positions[1][just_finished]
@@ -366,6 +368,29 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             counter += 1
             if done:
                 break
+
+        # last call to compute the loss
+        if self.float_type == torch.float32:
+            output = self.frozen_model.model(
+                input_ids=None,
+                position_ids=None,
+                encoder_input=embedding,
+                labels=labels,
+                attention_mask=attention_mask,
+                set_inference_key_value_memory=False,
+                inference_max_sequence_len=None,
+            )
+        else:
+            with torch.autocast(device_type="cuda", dtype=self.float_type):
+                output = self.frozen_model.model(
+                    input_ids=None,
+                    position_ids=None,
+                    encoder_input=embedding,
+                    labels=labels,
+                    attention_mask=attention_mask,
+                    set_inference_key_value_memory=False,
+                    inference_max_sequence_len=None,
+                )
 
         return output
 
