@@ -360,7 +360,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                 output_tokens[~is_done.bool(), context_length] = max_tokens[~is_done.bool()]
 
             # when sampling the eod token and started and not done yet,  or reach the cot_end position
-            done_token = ((max_tokens == eod_id).byte() & context_length >= min(self.min_length, maxlen) & started.byte()) | (context_length >= cot_positions[1]).byte()
+            done_token = ((max_tokens == eod_id).byte() & (counter >= self.min_length) & started.byte()) | (context_length >= cot_positions[1]).byte()
             #             if context_length == maxlen:
             #                 # all done
             #                 break
