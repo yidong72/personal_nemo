@@ -321,7 +321,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             output = tensor_parallel.gather_from_tensor_model_parallel_region(output)
             #
             assert output is not None
-            logits = output[:, -1].view(batch_size, -1).contiguous()
+            logits = output[:, -1].view(batch_size, -1).contiguous().clone()
 
             # make sure it won't sample outside the vocab_size range
             logits[:, self.pseudo_token_ids_start :] = -float('Inf')
