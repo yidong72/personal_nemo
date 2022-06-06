@@ -63,6 +63,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         self.eos_token_id = self.tokenizer.eos_id if self.tokenizer.eos_id is not None else self.tokenizer.unk_id
         self.min_tau = cfg.get('min_tau', 0.1)
         self.max_tau = cfg.get('max_tau', 1.0)
+        self.min_length = cfg.get('min_length', 30)
         self.frozen_model = self.frozen_model.half()
 
     def load_task_templates(self, task_templates):
@@ -359,7 +360,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                 output_tokens[~is_done.bool(), context_length] = max_tokens[~is_done.bool()]
 
             # when sampling the eod token and started and not done yet,  or reach the cot_end position
-            done_token = ((max_tokens == eod_id).byte() & started.byte()) | (context_length >= cot_positions[1]).byte()
+            done_token = ((max_tokens == eod_id).byte() & context_length >= min(self.min_length, maxlen) & started.byte()) | (context_length >= cot_positions[1]).byte()
             #             if context_length == maxlen:
             #                 # all done
             #                 break
