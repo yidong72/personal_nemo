@@ -31,7 +31,7 @@ from nemo.collections.nlp.modules.common.megatron.utils import average_losses_ac
 from nemo.collections.nlp.modules.common.prompt_table import VirtualPromptPlaceholderToken, VirtualPromptSource
 
 try:
-    from apex.transformer import parallel_state
+    from apex.transformer import parallel_state, tensor_parallel
 
     HAVE_APEX = True
 
@@ -57,11 +57,13 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         super().__init__(cfg, trainer)
         self.cot_id = self.tokenizer.token_to_id(VirtualPromptPlaceholderToken.COT.value)
         self.pad_id = self.tokenizer.token_to_id(VirtualPromptPlaceholderToken.PAD.value)
-        self.eos_emb = self.word_embeddings(torch.tensor([self.tokenizer.eos_id]).cuda())[0]
+        # self.eos_emb = self.word_embeddings(torch.tensor([self.tokenizer.eos_id]).cuda())[0]
+        self.eos_emb = None
         self.pad_token_id = self.pad_id
         self.eos_token_id = self.tokenizer.eos_id if self.tokenizer.eos_id is not None else self.tokenizer.unk_id
         self.min_tau = cfg.get('min_tau', 0.1)
         self.max_tau = cfg.get('max_tau', 1.0)
+        self.frozen_model = self.frozen_model.half()
 
     def load_task_templates(self, task_templates):
         """
@@ -247,6 +249,9 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
         GPT style models. Bypasses the vocab token preprocessing done
         in the MegatronGPT class.
         """
+        if self.eos_emb is None:
+            self.eos_emb = self.word_embeddings(torch.tensor([self.tokenizer.eos_id]).cuda())[0]
+
         tau_value = self._schedule_tau()
         # Get embeddings for text tokens and insert virtual token embeddings
         if inference:
@@ -313,6 +318,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                     )
 
             output = output.float()
+            output = tensor_parallel.gather_from_tensor_model_parallel_region(output)
             #
             assert output is not None
             logits = output[:, -1].view(batch_size, -1).contiguous()
@@ -322,7 +328,10 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
 
             # one_hot token
             one_hot_token = F.gumbel_softmax(logits, tau=tau_value, hard=True)
-            prev = torch.mm(one_hot_token, self.word_embeddings.weight)
+            one_hot_parallel = tensor_parallel.scatter_to_tensor_model_parallel_region(one_hot_token)
+            output_parallel = torch.mm(one_hot_parallel.half(), self.word_embeddings.weight)
+            prev = tensor_parallel.reduce_from_tensor_model_parallel_region(output_parallel).clone()
+            # prev = torch.mm(one_hot_token, self.word_embeddings.weight)
             # apply the positional embedding
             prev += position_embeddings[:, context_length]
 
