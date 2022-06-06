@@ -517,6 +517,9 @@ class ParallelAttention(MegatronModule):
         # =================================================
         if set_inference_key_value_memory:
             assert inference_max_sequence_len and inference_max_sequence_len > 0
+            # reset it first time using it
+            self.inference_key_memory = None
+            self.inference_value_memory = None
             # self.inference_key_memory = self._allocate_memory(
             #     inference_max_sequence_len, hidden_states.size(1), hidden_states.dtype
             # )
