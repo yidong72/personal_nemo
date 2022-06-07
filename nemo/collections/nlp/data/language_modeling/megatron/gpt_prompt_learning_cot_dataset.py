@@ -333,7 +333,7 @@ class GPTPromptLearningCOTDataset(Dataset):
         batch_max = max(len(ids) for ids in input_ids)
         pad_infront = np.array(cot_start).max() - np.array(cot_start)
 
-        input_ids, loss_mask, batch_max = self.pad_batch_and_build_loss_mask(input_ids, answer_starts, pad_infront)
+        input_ids, loss_mask, batch_max, answer_starts = self.pad_batch_and_build_loss_mask(input_ids, answer_starts, pad_infront)
 
         # Should be a label for every token in batch, label is the next token
         labels = input_ids[:, 1:].contiguous()
@@ -361,6 +361,7 @@ class GPTPromptLearningCOTDataset(Dataset):
         """ Pad input_ids in batch to max batch length while building loss mask """
         batch_loss_masks = []
         all_ids = []
+        adjusted_answer_start = []
         for ids, answer_start_idx, pad_before in zip(input_ids, answer_starts, pad_infront):
             if answer_start_idx is not None:
                 # Loss mask where answer tokens are 1.0 and all other tokens are 0.0
@@ -378,7 +379,7 @@ class GPTPromptLearningCOTDataset(Dataset):
             # Account for padding in loss mask
             # loss_mask.extend([0.0] * padding_length)
             batch_loss_masks.append(single_mask)
-
+            adjusted_answer_start.append(answer_start_idx + pad_before)
         batch_max = max(len(ids) for ids in all_ids)
 
         for ids, loss_masks in zip(all_ids, batch_loss_masks):
@@ -393,7 +394,7 @@ class GPTPromptLearningCOTDataset(Dataset):
         input_ids = torch.tensor(all_ids, dtype=torch.long)
         batch_loss_masks = torch.tensor(batch_loss_masks)
 
-        return input_ids, batch_loss_masks, batch_max
+        return input_ids, batch_loss_masks, batch_max, adjusted_answer_start
 
     def get_all_examples(self, tokens_to_generate):
         """
@@ -405,7 +406,7 @@ class GPTPromptLearningCOTDataset(Dataset):
         batch_max = input_lengths.max().item()
         batch_max += tokens_to_generate
 
-        input_ids, _ = self.pad_batch_and_build_loss_mask(input_ids, batch_max, answer_starts)
+        input_ids, _, ans_start = self.pad_batch_and_build_loss_mask(input_ids, batch_max, answer_starts)
         input_ids = input_ids.cuda()
         input_ids = torch.cuda.LongTensor(input_ids)
 

@@ -57,7 +57,7 @@ model:
 
   task_templates: # Add more/replace tasks as needed, these are just examples
   - taskname: 'math' # The task name
-    prompt_template: '<|VIRTUAL_PROMPT_0|> {question} A: Let us think step by step. <|COT|>  Therefore the answer is:{answer}' # Prompt template for task, specify virtual prompt positions with <|VIRTUAL_PROMPT_#|>
+    prompt_template: '<|VIRTUAL_PROMPT_0|> {question} A: Let us think step by step. <|COT|>  Therefore,{answer}' # Prompt template for task, specify virtual prompt positions with <|VIRTUAL_PROMPT_#|>
     total_virtual_tokens: 6 # Sum of tokens in virtual_token_splits must add to this number. Can differ between new and existing tasks, but must match across all new tasks being tuned at the same time.
     virtual_token_splits: [6] # number of virtual tokens to be inserted at each VIRTUAL PROMPT location, must add to total_virtual_tokens
     cot_tokens: 110 # chain of thought number of tokens

@@ -360,7 +360,10 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                 output_tokens[~is_done.bool(), context_length] = max_tokens[~is_done.bool()]
 
             # when sampling the eod token and started and not done yet,  or reach the cot_end position
-            done_token = ((max_tokens == eod_id).byte() & (counter >= self.min_length) & started.byte()) | (context_length >= cot_positions[1]).byte()
+            # eods = eod_id
+            # ends at the prompt text after the cot
+            eods = input_ids[:, cot_positions[1]].diagonal()
+            done_token = ((max_tokens == eods).byte() & (counter >= self.min_length) & started.byte()) | (context_length >= cot_positions[1]).byte()
             #             if context_length == maxlen:
             #                 # all done
             #                 break
@@ -382,6 +385,11 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                         # adjust loss _mask
                         loss_mask[i, context_length : end - start + context_length] = loss_mask[i, start:end].clone()
                         loss_mask[i, end - start + context_length :] = 0
+
+                        # extend the loss_mask to covert cot and loss
+                        mask_beg = cot_positions[0, i] - 1
+                        mask_end = answer_starts[i] - start + context_length
+                        loss_mask[i, mask_beg:mask_end] = 1
                         # adjust output tokens
                         if get_tokens:
                             output_tokens[i, context_length : end - start + context_length] = input_ids[
