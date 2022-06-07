@@ -207,7 +207,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             cot_positions=cot_positions,
             answer_starts=answer_starts,
             loss_mask=loss_mask,
-            get_tokens=False,
+            get_tokens=True,
         )
         output_tensor, encoder_hidden_states = output
         loss = self.frozen_model.loss_func(loss_mask, output_tensor)
@@ -396,6 +396,8 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
                                 i, start:end
                             ].clone()
                             output_tokens[i, end - start + context_length :] = self.eos_token_id
+                        # need to fix the labels
+                        labels[i, mask_beg:mask_end] = output_tokens[i, mask_beg+1:mask_end+1] 
 
             # if it finishes early due ot eod_id sample, set the cot_stop early
             # cot_stop_index[just_finished] = cot_positions[1][just_finished]
