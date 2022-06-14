@@ -187,7 +187,7 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             output_tensor, _ = output
             loss = self.frozen_model.loss_func(loss_mask, output_tensor)
             self.log('val_loss', loss)
-
+            print('current loss:', loss)
             return loss
 
     def _schedule_tau(self):
@@ -328,7 +328,12 @@ class MegatronGPTPromptLearningCOTModel(MegatronGPTPromptLearningModel):
             logits[:, self.pseudo_token_ids_start :] = -float('Inf')
 
             # one_hot token
-            one_hot_token = F.gumbel_softmax(logits, tau=tau_value, hard=True)
+            if tau_value == 0:
+                max_idx = torch.argmax(logits, -1, keepdim=True)
+                one_hot_token = torch.zeros_like(logits)
+                one_hot_token.scatter_(1, max_idx, 1)
+            else:
+                one_hot_token = F.gumbel_softmax(logits, tau=tau_value, hard=True)
             one_hot_parallel = tensor_parallel.scatter_to_tensor_model_parallel_region(one_hot_token)
             output_parallel = torch.mm(one_hot_parallel.half(), self.word_embeddings.weight)
             prev = tensor_parallel.reduce_from_tensor_model_parallel_region(output_parallel).clone()
