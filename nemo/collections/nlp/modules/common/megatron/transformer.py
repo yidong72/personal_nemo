@@ -38,7 +38,8 @@ from nemo.utils import logging
 try:
     from apex.transformer import parallel_state, tensor_parallel
     from apex.transformer.enums import AttnMaskType, AttnType, ModelType
-    from apex.transformer.functional.fused_softmax import FusedScaleMaskSoftmax
+    #from apex.transformer.functional.fused_softmax import FusedScaleMaskSoftmax
+    from nemo.collections.nlp.modules.common.megatron.fused_softmax import FusedScaleMaskSoftmax
     from apex.transformer.utils import divide as safe_divide
     from apex.transformer.parallel_state import get_tensor_model_parallel_world_size
     from apex.normalization import MixedFusedRMSNorm
@@ -353,7 +354,6 @@ class ParallelAttention(MegatronModule):
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
             fused_fp16,
             fused_bf16,
-            self.attn_mask_type,
             masked_softmax_fusion,
             attention_mask_func,
             self.attention_softmax_in_fp32,
