@@ -283,15 +283,15 @@ __global__ void scaled_masked_softmax_warp_forward_new(
         num_warps = (shared_mem_len - 1) / C10_WARP_SIZE + 1;
     }
 
-    acc_t reduced_val = shared[0];
-    if (reduced_val < -10000.0 + 0.1){
-        // if everything is masked, pay attention to nothing
-        #pragma unroll
-        for (int i = local_idx; i < element_count; i += threads_per_block){
-             dst[offset + i] = 0.0;
-        }
-        return;
-    }
+    //acc_t reduced_val = shared[0];
+    //if (reduced_val < -10000.0 + 0.1){
+    //    // if everything is masked, pay attention to nothing
+    //    #pragma unroll
+    //    for (int i = local_idx; i < element_count; i += threads_per_block){
+    //         dst[offset + i] = 0.0;
+    //    }
+    //    return;
+    //}
 
     // update the values
     #pragma unroll
