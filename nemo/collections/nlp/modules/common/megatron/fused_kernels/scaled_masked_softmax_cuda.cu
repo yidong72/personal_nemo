@@ -74,16 +74,18 @@ torch::Tensor fwd_cuda(
 torch::Tensor bwd_cuda(
     torch::Tensor const& output_grads_, 
     torch::Tensor const& softmax_results_, 
+    torch::Tensor const& mask,
     float scale_factor)  {
 
   auto output_grads = output_grads_.contiguous();
   auto softmax_results = softmax_results_.contiguous();
-
+  const int pad_batches = mask.size(0);
   //output grads is a 4d tensor with dimensions [batches, attn_heads, seq_len, seq_len]
   const int batches = output_grads.size(0);
   const int attn_heads = output_grads.size(1);
   const int query_seq_len = output_grads.size(2);
   const int key_seq_len = output_grads.size(3);
+  void* mask_ptr = static_cast<void*>(mask.data_ptr());
 
   auto act_options = output_grads.options();
   torch::Tensor input_grad = 
@@ -99,11 +101,13 @@ torch::Tensor bwd_cuda(
           reinterpret_cast<scalar_t*>(static_cast<void*>(input_grad.data_ptr())), 
 	  reinterpret_cast<scalar_t*>(output_grads_ptr), 
 	  reinterpret_cast<scalar_t const*>(softmax_results.data_ptr()),
+	  reinterpret_cast<const uint8_t*>(mask_ptr),
 	  scale_factor,
 	  query_seq_len,
 	  key_seq_len,
 	  batches,
-	  attn_heads);
+	  attn_heads,
+      pad_batches);
 			   );
   
   //backward pass is completely in-place

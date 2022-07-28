@@ -67,8 +67,12 @@ __global__ void scaled_masked_softmax_warp_backward_new(
     output_t *gradInput, //[batches, attn_heads, q_len, k_len]
     input_t *grad, 
     const input_t *output, //[batches, attn_heads, q_len, k_len]
+    const uint8_t *mask, 
     acc_t scale, 
-    int element_count)
+    int element_count,
+    int query_len, 
+    int attn_heads,
+    int pad_batches)
 {
     int threads_per_block = blockDim.x; 
     //the first element_count*2 elements are used for cache, the last 128 is used for reduction
@@ -81,6 +85,17 @@ __global__ void scaled_masked_softmax_warp_backward_new(
     int num_reductions =  (element_count - 1) / threads_per_block + 1;
 
     int offset = blockIdx.x * element_count;
+
+    int mask_offset;
+    int query_id = blockIdx.x % query_len; 
+    if (pad_batches == 1){
+        // broadcaste the mask tensor 
+        mask_offset = query_id * element_count; 
+    }
+    else{
+        int mask_batch_id = blockIdx.x / attn_heads / query_len;
+        mask_offset = (mask_batch_id * query_len + query_id) * element_count;
+    }
 
     int local_idx = threadIdx.x;
     int lane = threadIdx.x % C10_WARP_SIZE;
@@ -146,7 +161,14 @@ __global__ void scaled_masked_softmax_warp_backward_new(
     val = shared[0];
     #pragma unroll
     for (int i = local_idx; i < element_count; i += threads_per_block){
-        gradInput[offset + i] = (output_t)(scale*(local_data[i] - output_data[i]*val)); 
+        if (mask[mask_offset + i] == 1)
+        {
+            gradInput[offset + i] = 0.0;
+        }
+        else{
+            gradInput[offset + i] = (output_t)(scale*(local_data[i] - output_data[i]*val)); 
+        }
+
     }
 }
 
@@ -157,11 +179,13 @@ void dispatch_scaled_masked_softmax_backward_new(
     output_t *grad_input, 
     input_t *grad, 
     const input_t *output, 
+    const uint8_t *mask,
     const acc_t scale, 
     int query_seq_len, 
     int key_seq_len, 
     int batches,
-    int attn_heads)
+    int attn_heads,
+    int pad_batches)
 {
     if (key_seq_len == 0)
     {
@@ -177,7 +201,7 @@ void dispatch_scaled_masked_softmax_backward_new(
         dim3 threads(threads_per_block, 1, 1);
 
         scaled_masked_softmax_warp_backward_new<input_t, output_t, acc_t, 12>
-            <<<blocks, threads, sizeof(input_t)*key_seq_len*2 + sizeof(acc_t)*num_warps, at::cuda::getCurrentCUDAStream()>>>(grad_input, grad, output, scale, key_seq_len);
+            <<<blocks, threads, sizeof(input_t)*key_seq_len*2 + sizeof(acc_t)*num_warps, at::cuda::getCurrentCUDAStream()>>>(grad_input, grad, output, mask, scale, key_seq_len, query_seq_len, attn_heads, pad_batches);
     }
 }
 
@@ -288,7 +312,7 @@ __global__ void scaled_masked_softmax_warp_forward_new(
         // if everything is masked, pay attention to nothing
         #pragma unroll
         for (int i = local_idx; i < element_count; i += threads_per_block){
-             dst[offset + i] = 0.0;
+             dst[offset + i] = 1.0 / element_count;
         }
         return;
     }

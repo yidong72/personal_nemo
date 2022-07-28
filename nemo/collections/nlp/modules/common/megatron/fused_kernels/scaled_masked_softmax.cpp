@@ -33,6 +33,7 @@ namespace multihead_attn
       torch::Tensor bwd_cuda(
           torch::Tensor const &output_grads,
           torch::Tensor const &softmax_results,
+          torch::Tensor const &mask,
           float scale_factor);
 
       torch::Tensor fwd(
@@ -52,6 +53,7 @@ namespace multihead_attn
       torch::Tensor bwd(
           torch::Tensor const &output_grads,
           torch::Tensor const &softmax_results,
+          torch::Tensor const &mask,
           float scale_factor)
       {
 
@@ -65,7 +67,7 @@ namespace multihead_attn
                        (softmax_results.scalar_type() == at::ScalarType::BFloat16),
                    "Only fp16 and bf16 are supported");
 
-        return bwd_cuda(output_grads, softmax_results, scale_factor);
+        return bwd_cuda(output_grads, softmax_results, mask, scale_factor);
       }
 
     } // end namespace scaled_masked_softmax

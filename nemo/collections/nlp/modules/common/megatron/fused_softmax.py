@@ -29,16 +29,16 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
 
         scale_t = torch.tensor([scale])
         softmax_results = scaled_masked_softmax_cuda_new.forward(inputs, mask, scale_t[0])
-        ctx.save_for_backward(softmax_results, scale_t)
+        ctx.save_for_backward(softmax_results, mask, scale_t)
         return softmax_results
 
     @staticmethod
     def backward(ctx, output_grads):
         import scaled_masked_softmax_cuda_new
 
-        softmax_results, scale_t = ctx.saved_tensors
+        softmax_results, mask, scale_t = ctx.saved_tensors
 
-        input_grads = scaled_masked_softmax_cuda_new.backward(output_grads, softmax_results, scale_t[0])
+        input_grads = scaled_masked_softmax_cuda_new.backward(output_grads, softmax_results, mask, scale_t[0])
         return input_grads, None, None
 
 
